@@ -1,0 +1,169 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: haproxy-ingress
+spec:
+  interval: 1h
+  url: https://haproxy-ingress.github.io/charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: haproxy-ingress
+spec:
+  chart:
+    spec:
+      chart: haproxy-ingress
+      version: "0.16.1"
+      reconcileStrategy: ChartVersion
+      sourceRef:
+        kind: HelmRepository
+        name: haproxy-ingress
+  interval: 1m0s
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      strategy: rollback
+  values:
+    controller:
+      ingressClass: haproxy
+
+      ingressClassResource:
+        enabled: true
+        default: false
+
+      config:
+        timeout-connect: "5s"
+        timeout-client: "50s"
+        timeout-server: "50s"
+        timeout-queue: "5s"
+        timeout-tunnel: "1h"
+        timeout-http-request: "10s"
+        # timeout-keep-alive: "910s"
+        # Cloudflare reuses an idle origin connection for 900s. 910s lets CF close
+        # first (no extra TLS handshake). Safe only if every peer is Cloudflare —
+        # loadBalancerSourceRanges + no public NodePorts. This cluster has hosts
+        # that are not behind CF, so leave unset (default ~1m).
+        max-connections: "20000"
+        syslog-length: "4096"
+        nbthread: "2"
+        ssl-min-ver: TLSv1.2
+        forwardfor: "ignore"
+        proxy-body-size: "1g"
+        config-defaults: |
+          compression algo gzip
+          compression type text/html text/css text/plain text/xml application/json application/javascript application/xml image/svg+xml
+        config-frontend: |
+          # Trust CF-Connecting-IP only if src is a Cloudflare edge; else use src.
+          # CIDRs: https://www.cloudflare.com/ips-v4/ and ips-v6/ (2026-09-09).
+          acl cf_edge src 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+          acl cf_edge src 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+          acl cf_ip_hdr req.hdr(CF-Connecting-IP) -m found
+          acl xff_present req.hdr(X-Forwarded-For) -m found
+
+          http-request set-header X-Real-IP %[req.hdr(CF-Connecting-IP)] if cf_edge cf_ip_hdr
+          http-request set-header X-Real-IP %[src] unless cf_edge cf_ip_hdr
+
+          http-request set-header X-Forwarded-For "%[req.hdr(X-Forwarded-For)], %[src]" if xff_present
+          http-request set-header X-Forwarded-For %[src] if !xff_present
+
+          http-request set-var(txn.client_ip) req.hdr(CF-Connecting-IP) if cf_edge cf_ip_hdr
+          http-request set-var(txn.client_ip) src if !{ var(txn.client_ip) -m found }
+          http-request set-var(txn.host) req.hdr(host)
+          http-request set-var(txn.path) path
+          http-request set-var(txn.query) query
+          http-request set-var(txn.ua) req.hdr(User-Agent)
+          http-request set-var(txn.cf_ray) req.hdr(CF-Ray)
+          http-request set-var(txn.cf_country) req.hdr(CF-IPCountry)
+          log-format {\"timestamp\":\"%tr\",\"client.address\":\"%[var(txn.client_ip)]\",\"network.peer.address\":\"%ci\",\"server.address\":\"%[var(txn.host)]\",\"http.request.method\":\"%HM\",\"http.version\":\"%[fc_http_major]\",\"tls.version\":\"%sslv\",\"tls.cipher\":\"%sslc\",\"tls.sni\":\"%[ssl_fc_sni]\",\"url.path\":\"%[var(txn.path)]\",\"url.query\":\"%[var(txn.query)]\",\"http.request.body.size\":%U,\"http.response.status_code\":%ST,\"http.response.body.size\":%B,\"timers\":{\"tls_handshake_ms\":%Th,\"client_idle_ms\":%Ti,\"request_read_ms\":%TR,\"queue_ms\":%Tw,\"backend_connect_ms\":%Tc,\"server_response_ms\":%Tr,\"response_send_ms\":%Td,\"active_total_ms\":%Ta,\"session_total_ms\":%Tt},\"user_agent.original\":\"%[var(txn.ua)]\",\"cf.ray_id\":\"%[var(txn.cf_ray)]\",\"cf.country\":\"%[var(txn.cf_country)]\",\"haproxy.frontend\":\"%ft\",\"haproxy.backend\":\"%b\",\"haproxy.server\":\"%s\",\"server.pod_ip\":\"%si\",\"haproxy.termination_state\":\"%tsc\",\"haproxy.active_connections\":%ac,\"haproxy.backend_connections\":%bc,\"haproxy.retries\":%rc}
+
+      terminationGracePeriodSeconds: 300
+
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: haproxy-ingress
+              app.kubernetes.io/instance: haproxy-ingress
+          maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: haproxy-ingress
+              app.kubernetes.io/instance: haproxy-ingress
+          maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+
+      replicaCount: 3
+
+      minAvailable: 1
+
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "2000m"
+          memory: "1Gi"
+
+      autoscaling:
+        enabled: true
+        minReplicas: 3
+        maxReplicas: 9
+        targetCPUUtilizationPercentage: 200
+        targetMemoryUtilizationPercentage: 100
+
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+
+      publishService:
+        enabled: false
+
+      service:
+        type: LoadBalancer
+        externalTrafficPolicy: Cluster
+
+      metrics:
+        enabled: true
+
+      serviceMonitor:
+        enabled: false
+
+      logs:
+        enabled: true
+        resources:
+          requests:
+            cpu: 5m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              group: autoscaling
+              version: v2
+              kind: HorizontalPodAutoscaler
+            patch: |-
+              - op: add
+                path: /spec/behavior
+                value:
+                  scaleDown:
+                    stabilizationWindowSeconds: 300
+                    policies:
+                      - type: Pods
+                        value: 1
+                        periodSeconds: 180
+                  scaleUp:
+                    stabilizationWindowSeconds: 300
+                    policies:
+                      - type: Pods
+                        value: 2
+                        periodSeconds: 60
