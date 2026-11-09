@@ -1,0 +1,128 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cert-manager
+spec:
+  interval: 1h
+  url: https://charts.jetstack.io
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+spec:
+  chart:
+    spec:
+      chart: cert-manager
+      version: "1.20.2"
+      reconcileStrategy: ChartVersion
+      sourceRef:
+        kind: HelmRepository
+        name: cert-manager
+  interval: 10m0s
+  install:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  values:
+    crds:
+      enabled: true
+      keep: true
+
+    replicaCount: 1
+
+    podDisruptionBudget:
+      enabled: false
+
+    maxConcurrentChallenges: 60
+
+    dns01RecursiveNameservers: "https://1.1.1.1/dns-query,https://1.0.0.1/dns-query"
+    dns01RecursiveNameserversOnly: true
+
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 256Mi
+      requests:
+        cpu: 64m
+        memory: 128Mi
+
+    podDnsPolicy: "None"
+    podDnsConfig:
+      nameservers:
+        - "1.1.1.1"
+        - "8.8.8.8"
+
+    nodeSelector:
+      kubernetes.io/os: linux
+
+    prometheus:
+      enabled: true
+      servicemonitor:
+        enabled: false
+
+    webhook:
+      replicaCount: 1
+      timeoutSeconds: 10
+
+      podDisruptionBudget:
+        enabled: false
+
+      # Admission path: every API write waits on this webhook. 64Mi pinned
+      # memory.max with file-page thrash in jepreto/infra on the etcd node.
+      resources:
+        limits:
+          cpu: 200m
+          memory: 128Mi
+        requests:
+          cpu: 50m
+          memory: 64Mi
+
+      nodeSelector:
+        kubernetes.io/os: linux
+
+    cainjector:
+      enabled: true
+      replicaCount: 1
+
+      podDisruptionBudget:
+        enabled: false
+
+      # Only cert-manager-webhook uses CA injection here (no annotated CRDs /
+      # APIServices). Disable the unused sources so the informer caches stay
+      # small; 100Mi was pinning memory.max and thrashing file pages on the
+      # control-plane disk (same failure mode as jepreto/infra).
+      extraArgs:
+        - --enable-certificates-data-source=false
+        - --enable-customresourcedefinitions-injectable=false
+        - --enable-apiservices-injectable=false
+
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 128Mi
+
+      nodeSelector:
+        kubernetes.io/os: linux
+
+    startupapicheck:
+      enabled: true
+      timeout: 1m
+
+      resources:
+        limits:
+          cpu: 100m
+          memory: 80Mi
+        requests:
+          cpu: 10m
+          memory: 32Mi
+
+      nodeSelector:
+        kubernetes.io/os: linux
